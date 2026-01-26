@@ -61,6 +61,37 @@ if (process.env.NODE_ENV === 'development') {
 // Routes
 // ============================================
 
+// ✅ Root endpoint - เพิ่มตรงนี้
+app.get('/', (req, res) => {
+  res.json({
+    success: true,
+    message: 'EyeMate Patient API',
+    version: '1.0.0',
+    environment: process.env.NODE_ENV || 'development',
+    endpoints: {
+      health: '/health',
+      auth: '/api/auth',
+      patients: '/api/patients',
+      symptoms: '/api/patients/symptoms',
+      medications: '/api/patients/medications',
+      medicationLogs: '/api/patients/medication-logs',
+      iopReadings: '/api/patients/iop-readings',
+      medicalFiles: '/api/patients/medical-files',
+      medicationReminders: '/api/patients/medication-reminders'
+    }
+  });
+});
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({
+    success: true,
+    message: 'EyeMate API is running',
+    environment: process.env.NODE_ENV || 'development',
+    timestamp: new Date().toISOString()
+  });
+});
+
 const authRoutes = require('./routes/auth.routes');
 const patientRoutes = require('./routes/patient.routes');
 const symptomRoutes = require('./routes/symptom.routes');
