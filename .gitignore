@@ -1,4 +1,3 @@
-// .gitignore (สร้างไฟล์นี้ก่อน)
 node_modules/
 .env
 .env.local
@@ -7,3 +6,4 @@ node_modules/
 .DS_Store
 dist/
 build/
+package-lock.json
