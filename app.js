@@ -20,17 +20,23 @@ app.use(helmet());
 // CORS configuration
 const corsOptions = {
   origin: function (origin, callback) {
-    const whitelist = [
-      'http://localhost:3002',      // React Admin (development)
-      'http://localhost:19006',     // Expo (development)
-      process.env.ADMIN_URL,        // Production admin
-      process.env.APP_URL           // Production app
-    ].filter(Boolean);
-    
-    if (!origin || whitelist.indexOf(origin) !== -1) {
-      callback(null, true);
+    if (process.env.NODE_ENV === 'production') {
+      callback(null, true); // อนุญาตทุก origin
     } else {
-      callback(new Error('Not allowed by CORS'));
+      const whitelist = [
+        'http://localhost:3000',
+        'http://localhost:3002',
+        'http://localhost:19006',
+        'http://localhost:19000',
+        process.env.ADMIN_URL,
+        process.env.APP_URL
+      ].filter(Boolean);
+      
+      if (!origin || whitelist.indexOf(origin) !== -1) {
+        callback(null, true);
+      } else {
+        callback(new Error('Not allowed by CORS'));
+      }
     }
   },
   credentials: true,

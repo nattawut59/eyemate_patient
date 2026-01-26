@@ -6,7 +6,7 @@ const db = require('./config/database.config'); // ✅ เพิ่มบรร�
 const PORT = process.env.PORT || 3002;
 
 // Start Server
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, '0.0.0.0', () => { 
   console.log('===========================================');
   console.log('✅ EyeMate API Server Started');
   console.log('===========================================');
