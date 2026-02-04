@@ -77,7 +77,9 @@ app.get('/', (req, res) => {
       medicationLogs: '/api/patients/medication-logs',
       iopReadings: '/api/patients/iop-readings',
       medicalFiles: '/api/patients/medical-files',
-      medicationReminders: '/api/patients/medication-reminders'
+      medicationReminders: '/api/patients/medication-reminders',
+      notifications: '/api/notifications',
+      appointments: '/api/appointments'
     }
   });
 });
@@ -100,6 +102,9 @@ const medicationLogRoutes = require('./routes/medicationLog.routes');
 const iopRoutes = require('./routes/iop.routes');
 const medicalDocumentRoutes = require('./routes/medicalDocument.routes');
 const medicationReminderRoutes = require('./routes/medicationReminder.routes');
+const notificationRoutes = require('./routes/notification.routes');
+const appointmentRoutes = require('./routes/appointment.routes');
+
 
 app.use('/api/auth', authRoutes);
 app.use('/api/patients', patientRoutes);
@@ -109,6 +114,8 @@ app.use('/api/patients/medication-logs', medicationLogRoutes);
 app.use('/api/patients/iop-readings', iopRoutes);
 app.use('/api/patients/medical-files', medicalDocumentRoutes);
 app.use('/api/patients/medication-reminders', medicationReminderRoutes);
+app.use('/api/appointments', appointmentRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -153,5 +160,8 @@ app.use((err, req, res, next) => {
 // ============================================
 // Export App (ไม่ start server ที่นี่)
 // ============================================
+const { startAppointmentRemindersCron } = require('./cron/appointmentReminders.cron');
+startAppointmentRemindersCron();
+
 
 module.exports = app;

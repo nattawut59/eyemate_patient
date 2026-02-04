@@ -10,6 +10,9 @@ const { validateScheduleCreation, validateScheduleUpdate } = require('../middlew
 router.use(verifyToken);
 router.use(verifyRole(['patient']));
 
+router.get('/', 
+  medicationReminderController.getReminders
+);
 /**
  * 10.1 สร้าง/อัปเดต Medication Schedule
  */
