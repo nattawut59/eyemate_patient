@@ -1,341 +1,444 @@
+// services/appointment.service.js
+
 const db = require('../config/database.config');
 const notificationService = require('./notification.service');
 
-/**
- * ดึงรายการนัดหมายของผู้ป่วย
- */
-async function getPatientAppointments(patientId, options = {}) {
-  try {
-    const {
-      status = null,
-      fromDate = null,
-      toDate = null,
-      limit = 20,
-      offset = 0
-    } = options;
-    
-    let query = `
-      SELECT 
-        a.appointment_id,
-        a.appointment_date,
-        a.appointment_time,
-        a.appointment_type,
-        a.appointment_location,
-        a.appointment_duration,
-        a.appointment_status,
-        a.notes,
-        d.first_name as doctor_first_name,
-        d.last_name as doctor_last_name,
-        d.specialty as doctor_specialty
-      FROM Appointments a
-      LEFT JOIN DoctorProfiles d ON a.doctor_id = d.doctor_id
-      WHERE a.patient_id = ?
-    `;
-    
-    const params = [patientId];
-    
-    if (status) {
-      query += ` AND a.appointment_status = ?`;
-      params.push(status);
-    }
-    
-    if (fromDate) {
-      query += ` AND a.appointment_date >= ?`;
-      params.push(fromDate);
-    }
-    
-    if (toDate) {
-      query += ` AND a.appointment_date <= ?`;
-      params.push(toDate);
-    }
-    
-    query += ` ORDER BY a.appointment_date DESC, a.appointment_time DESC LIMIT ? OFFSET ?`;
-    params.push(limit, offset);
-    
-    const [appointments] = await db.query(query, params);
-    
-    // นับจำนวนทั้งหมด
-    let countQuery = `
-      SELECT COUNT(*) as total 
-      FROM Appointments 
-      WHERE patient_id = ?
-    `;
-    const countParams = [patientId];
-    
-    if (status) {
-      countQuery += ` AND appointment_status = ?`;
-      countParams.push(status);
-    }
-    
-    if (fromDate) {
-      countQuery += ` AND appointment_date >= ?`;
-      countParams.push(fromDate);
-    }
-    
-    if (toDate) {
-      countQuery += ` AND appointment_date <= ?`;
-      countParams.push(toDate);
-    }
-    
-    const [countResult] = await db.query(countQuery, countParams);
-    
-    return {
-      appointments,
-      total: countResult[0].total,
-      limit,
-      offset
-    };
-    
-  } catch (error) {
-    console.error('Error getting patient appointments:', error);
-    throw error;
-  }
-}
+// ============================================
+// 1. ส่งแจ้งเตือนนัดหมายที่ใกล้เข้ามา
+//    เรียกจาก cron ทุกวัน 09:00 น.
+// ============================================
 
 /**
- * ดึงรายละเอียดนัดหมาย
+ * ส่งแจ้งเตือนนัดหมายล่วงหน้า
+ * - 3 วันก่อน  (reminder_type = '3_days')
+ * - 1 วันก่อน  (reminder_type = '1_day')
+ * - วันนัด ภายใน 3 ชั่วโมง
+ *
+ * ใช้ตาราง AppointmentReminders track ว่าส่งแล้วหรือยัง → ป้องกันส่งซ้ำ
  */
-async function getAppointmentDetail(appointmentId, patientId) {
+const sendAppointmentReminders = async () => {
+  try {
+    const now = new Date();
+    const todayStr = now.toISOString().split('T')[0];
+
+    const threeDaysLater = new Date(now);
+    threeDaysLater.setDate(threeDaysLater.getDate() + 3);
+    const threeDaysLaterStr = threeDaysLater.toISOString().split('T')[0];
+
+    const oneDayLater = new Date(now);
+    oneDayLater.setDate(oneDayLater.getDate() + 1);
+    const oneDayLaterStr = oneDayLater.toISOString().split('T')[0];
+
+    // ดึงนัดหมายในช่วง 3 วันข้างหน้า
+    const [appointments] = await db.query(
+      `SELECT
+         a.appointment_id,
+         a.patient_id,
+         a.appointment_date,
+         a.appointment_time,
+         a.appointment_location  AS location,
+         a.appointment_status    AS status,
+         CONCAT(u.first_name, ' ', u.last_name) AS doctor_name
+       FROM Appointments a
+       JOIN DoctorProfiles dp ON a.doctor_id = dp.doctor_id
+       JOIN users u ON dp.doctor_id = u.user_id
+       WHERE a.appointment_status = 'scheduled'
+         AND DATE(a.appointment_date) BETWEEN ? AND ?`,
+      [todayStr, threeDaysLaterStr]
+    );
+
+    if (appointments.length === 0) return { count: 0 };
+
+    let sentCount = 0;
+
+    for (const appt of appointments) {
+      try {
+        const apptDateStr = new Date(appt.appointment_date).toISOString().split('T')[0];
+        const timeLabel = appt.appointment_time?.substring(0, 5) || '';
+        const dateLabel = new Date(`${apptDateStr}T00:00:00`).toLocaleDateString('th-TH', {
+          weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+        });
+
+        let reminderType = null;
+        let title = '';
+        let body = '';
+
+        if (apptDateStr === threeDaysLaterStr) {
+          reminderType = '3_days';
+          title = '📅 เตือนนัดหมายล่วงหน้า';
+          body = `อีก 3 วัน: ${dateLabel} เวลา ${timeLabel} น.\nแพทย์: ${appt.doctor_name}\nสถานที่: ${appt.location}`;
+
+        } else if (apptDateStr === oneDayLaterStr) {
+          reminderType = '1_day';
+          title = '📅 พรุ่งนี้มีนัดหมาย';
+          body = `พรุ่งนี้ ${dateLabel} เวลา ${timeLabel} น.\nแพทย์: ${appt.doctor_name}\nสถานที่: ${appt.location}`;
+
+        } else if (apptDateStr === todayStr) {
+          const [apptH, apptM] = (appt.appointment_time || '00:00').split(':').map(Number);
+          const apptDateTime = new Date(`${apptDateStr}T00:00:00`);
+          apptDateTime.setHours(apptH, apptM, 0, 0);
+          const diffHours = (apptDateTime.getTime() - now.getTime()) / (1000 * 60 * 60);
+          if (diffHours < 0 || diffHours > 3) continue;
+
+          reminderType = '1_day'; // ใช้ 1_day สำหรับ same-day reminder ด้วย
+          title = '⏰ ใกล้ถึงเวลานัด';
+          body = `วันนี้ เวลา ${timeLabel} น.\nแพทย์: ${appt.doctor_name}\nสถานที่: ${appt.location}`;
+
+        } else {
+          continue;
+        }
+
+        // เช็คว่าเคยส่ง reminder_type นี้ไปแล้วหรือยัง (ป้องกันซ้ำ)
+        const [existing] = await db.query(
+          `SELECT reminder_id FROM AppointmentReminders
+           WHERE appointment_id = ? AND reminder_type = ? AND reminder_status = 'sent'`,
+          [appt.appointment_id, reminderType]
+        );
+        if (existing.length > 0) {
+          console.log(`⏭️ [Appointment] Already sent ${reminderType} for ${appt.appointment_id}`);
+          continue;
+        }
+
+        // ส่ง push notification
+        await notificationService.createAndSendNotification({
+          userId: appt.patient_id,
+          type: 'appointment',
+          title,
+          body,
+          relatedType: 'appointment',
+          relatedId: appt.appointment_id,
+          priority: 'high',
+          data: {
+            appointment_id: appt.appointment_id,
+            appointment_date: apptDateStr,
+            appointment_time: appt.appointment_time,
+          },
+          sendPush: true,
+        });
+
+        // บันทึกลง AppointmentReminders ป้องกันส่งซ้ำ
+        const reminderId = `REM${Date.now().toString().slice(-10)}${Math.random().toString(36).substring(2, 4).toUpperCase()}`;
+        await db.query(
+          `INSERT INTO AppointmentReminders
+             (reminder_id, appointment_id, patient_id, reminder_type,
+              reminder_channels, reminder_status, sent_at)
+           VALUES (?, ?, ?, ?, 'push', 'sent', NOW())`,
+          [reminderId, appt.appointment_id, appt.patient_id, reminderType]
+        );
+
+        // อัปเดต flag ใน Appointments
+        await db.query(
+          `UPDATE Appointments SET appointment_reminder_sent_at = NOW() WHERE appointment_id = ?`,
+          [appt.appointment_id]
+        );
+
+        sentCount++;
+        console.log(`✅ [Appointment] ${reminderType} sent → patient ${appt.patient_id}`);
+
+      } catch (err) {
+        console.error(`❌ [Appointment] Failed for ${appt.appointment_id}:`, err.message);
+      }
+    }
+
+    return { count: sentCount };
+
+  } catch (error) {
+    console.error('❌ [sendAppointmentReminders] Error:', error);
+    throw error;
+  }
+};
+
+// ============================================
+// 2. แจ้งเตือนสถานะการขอเลื่อนนัด
+// ============================================
+
+/**
+ * ส่งแจ้งเตือนเมื่อสถานะ reschedule request เปลี่ยน
+ * ใช้ชื่อ table/column จริงใน DB:
+ *   AppointmentChangeRequests, request_status, requested_new_date,
+ *   requested_new_time, admin_notes, action_by_id, action_date
+ */
+const sendRescheduleStatusNotification = async (
+  requestId,
+  newStatus,
+  updatedBy,
+  adminNotes = null
+) => {
+  try {
+    const [requests] = await db.query(
+      `SELECT
+         acr.request_id,
+         acr.patient_id,
+         acr.appointment_id,
+         acr.requested_new_date,
+         acr.requested_new_time,
+         acr.admin_notes,
+         a.appointment_date      AS original_date,
+         a.appointment_time      AS original_time,
+         a.appointment_location  AS location,
+         CONCAT(u.first_name, ' ', u.last_name) AS doctor_name
+       FROM AppointmentChangeRequests acr
+       JOIN Appointments a ON acr.appointment_id = a.appointment_id
+       JOIN DoctorProfiles dp ON a.doctor_id = dp.doctor_id
+       JOIN users u ON dp.doctor_id = u.user_id
+       WHERE acr.request_id = ?`,
+      [requestId]
+    );
+
+    if (requests.length === 0) {
+      console.warn(`⚠️ [Reschedule] Request not found: ${requestId}`);
+      return;
+    }
+
+    const req = requests[0];
+
+    // แปลง Date object เป็น string (MySQL อาจ return เป็น Date object)
+    const newDateStr = req.requested_new_date instanceof Date
+      ? req.requested_new_date.toISOString().split('T')[0]
+      : String(req.requested_new_date);
+    const origDateStr = req.original_date instanceof Date
+      ? req.original_date.toISOString().split('T')[0]
+      : String(req.original_date);
+
+    const newDateLabel = new Date(`${newDateStr}T00:00:00`).toLocaleDateString('th-TH', {
+      weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+    });
+    const newTimeLabel = req.requested_new_time?.substring(0, 5) || '';
+    const origDateLabel = new Date(`${origDateStr}T00:00:00`).toLocaleDateString('th-TH', {
+      day: 'numeric', month: 'long', year: 'numeric',
+    });
+    const origTimeLabel = req.original_time?.substring(0, 5) || '';
+
+    // ใช้ adminNotes ที่ส่งมา ถ้าไม่มีใช้จาก DB
+    const noteText = adminNotes || req.admin_notes;
+
+    let title = '';
+    let body = '';
+
+    if (newStatus === 'approved') {
+      title = '✅ อนุมัติการเลื่อนนัดแล้ว';
+      body =
+        `นัดหมายใหม่: ${newDateLabel}\n` +
+        `เวลา: ${newTimeLabel} น.\n` +
+        `แพทย์: ${req.doctor_name}\n` +
+        `สถานที่: ${req.location}`;
+
+    } else if (newStatus === 'rejected') {
+      title = '❌ ไม่อนุมัติการเลื่อนนัด';
+      body =
+        `คำขอเลื่อนไปวันที่ ${newDateLabel} เวลา ${newTimeLabel} น. ไม่ได้รับการอนุมัติ\n` +
+        `นัดหมายเดิม: ${origDateLabel} เวลา ${origTimeLabel} น. ยังคงเดิม` +
+        (noteText ? `\nหมายเหตุ: ${noteText}` : '');
+
+    } else {
+      return; // สถานะอื่นไม่ส่ง
+    }
+
+    await notificationService.createAndSendNotification({
+      userId: req.patient_id,
+      type: 'appointment_reschedule',
+      title,
+      body,
+      relatedType: 'appointment_change_request',
+      relatedId: requestId,
+      priority: 'high',
+      data: {
+        request_id: requestId,
+        appointment_id: req.appointment_id,
+        new_status: newStatus,
+        requested_new_date: newDateStr,
+        requested_new_time: req.requested_new_time,
+      },
+      sendPush: true,
+    });
+
+    console.log(`✅ [Reschedule] Notification sent: ${newStatus} → patient ${req.patient_id}`);
+
+  } catch (error) {
+    console.error('❌ [sendRescheduleStatusNotification] Error:', error);
+    throw error;
+  }
+};
+
+// ============================================
+// 3. ดึงข้อมูลนัดหมาย
+// ============================================
+
+const getUpcomingAppointments = async (patientId, days = 30) => {
   try {
     const [appointments] = await db.query(
-      `SELECT 
-        a.appointment_id,
-        a.appointment_date,
-        a.appointment_time,
-        a.appointment_type,
-        a.appointment_location,
-        a.appointment_duration,
-        a.appointment_status,
-        a.cancellation_reason,
-        a.notes,
-        a.created_at,
-        d.first_name as doctor_first_name,
-        d.last_name as doctor_last_name,
-        d.specialty as doctor_specialty,
-        d.hospital_affiliation
-      FROM Appointments a
-      LEFT JOIN DoctorProfiles d ON a.doctor_id = d.doctor_id
-      WHERE a.appointment_id = ? AND a.patient_id = ?`,
-      [appointmentId, patientId]
+      `SELECT
+         a.appointment_id,
+         a.appointment_date,
+         a.appointment_time,
+         a.appointment_type,
+         a.appointment_location  AS location,
+         a.appointment_status    AS status,
+         a.notes,
+         CONCAT(u.first_name, ' ', u.last_name) AS doctor_name,
+         dp.specialty
+       FROM Appointments a
+       JOIN DoctorProfiles dp ON a.doctor_id = dp.doctor_id
+       JOIN users u ON dp.doctor_id = u.user_id
+       WHERE a.patient_id = ?
+         AND a.appointment_status = 'scheduled'
+         AND DATE(a.appointment_date) >= CURDATE()
+         AND DATE(a.appointment_date) <= DATE_ADD(CURDATE(), INTERVAL ? DAY)
+       ORDER BY a.appointment_date ASC, a.appointment_time ASC`,
+      [patientId, days]
     );
-    
-    if (appointments.length === 0) {
-      return null;
-    }
-    
-    return appointments[0];
-    
+    return { success: true, data: appointments, total: appointments.length };
   } catch (error) {
-    console.error('Error getting appointment detail:', error);
     throw error;
   }
-}
+};
+
+const getRescheduleRequests = async (patientId, status = null) => {
+  try {
+    let query = `
+      SELECT
+        acr.request_id,
+        acr.appointment_id,
+        acr.request_type,
+        acr.requested_new_date,
+        acr.requested_new_time,
+        acr.reason,
+        acr.request_status      AS status,
+        acr.admin_notes,
+        acr.action_date,
+        acr.created_at,
+        a.appointment_date      AS original_date,
+        a.appointment_time      AS original_time,
+        a.appointment_location  AS location,
+        CONCAT(u.first_name, ' ', u.last_name) AS doctor_name
+      FROM AppointmentChangeRequests acr
+      JOIN Appointments a ON acr.appointment_id = a.appointment_id
+      JOIN DoctorProfiles dp ON a.doctor_id = dp.doctor_id
+      JOIN users u ON dp.doctor_id = u.user_id
+      WHERE acr.patient_id = ?
+    `;
+    const params = [patientId];
+    if (status) {
+      query += ` AND acr.request_status = ?`;
+      params.push(status);
+    }
+    query += ` ORDER BY acr.created_at DESC`;
+    const [requests] = await db.query(query, params);
+    return { success: true, data: requests, total: requests.length };
+  } catch (error) {
+    throw error;
+  }
+};
+
+const createRescheduleRequest = async (patientId, requestData) => {
+  try {
+    const { appointment_id, requested_date, requested_time, reason } = requestData;
+
+    const [appointments] = await db.query(
+      `SELECT appointment_id FROM Appointments
+       WHERE appointment_id = ? AND patient_id = ? AND appointment_status = 'scheduled'`,
+      [appointment_id, patientId]
+    );
+    if (appointments.length === 0) throw new Error('ไม่พบนัดหมายหรือนัดหมายถูกยกเลิกแล้ว');
+
+    const [pending] = await db.query(
+      `SELECT request_id FROM AppointmentChangeRequests
+       WHERE appointment_id = ? AND request_status = 'pending'`,
+      [appointment_id]
+    );
+    if (pending.length > 0) throw new Error('มีคำขอเลื่อนนัดที่รอการอนุมัติอยู่แล้ว');
+
+    const requestId = `REQ${Date.now().toString().slice(-10)}${Math.random().toString(36).substring(2, 5).toUpperCase()}`;
+    await db.query(
+      `INSERT INTO AppointmentChangeRequests
+         (request_id, patient_id, appointment_id, request_type,
+          requested_new_date, requested_new_time, reason, request_status, created_at)
+       VALUES (?, ?, ?, 'reschedule', ?, ?, ?, 'pending', NOW())`,
+      [requestId, patientId, appointment_id, requested_date, requested_time, reason]
+    );
+
+    return {
+      success: true,
+      request_id: requestId,
+      message: 'ส่งคำขอเลื่อนนัดสำเร็จ รอการอนุมัติจากแพทย์',
+    };
+  } catch (error) {
+    throw error;
+  }
+};
 
 /**
- * สร้างนัดหมายใหม่ (โดย admin/doctor)
- * และส่ง notification ให้ผู้ป่วย
+ * อัปเดตสถานะ (doctor/admin) → ส่ง notification หาผู้ป่วยอัตโนมัติ
  */
-async function createAppointment(appointmentData, createdBy) {
+const updateRescheduleRequestStatus = async (
+  requestId,
+  newStatus,
+  updatedBy,
+  adminNotes = null
+) => {
   const connection = await db.getConnection();
-  
   try {
     await connection.beginTransaction();
-    
-    // 1. สร้าง appointment ID
-    const appointmentId = 'APPT' + Date.now();
-    
-    // 2. Insert appointment
-    await connection.query(
-      `INSERT INTO Appointments (
-        appointment_id,
-        patient_id,
-        doctor_id,
-        appointment_date,
-        appointment_time,
-        appointment_type,
-        appointment_location,
-        appointment_duration,
-        appointment_status,
-        notes,
-        created_by,
-        created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, NOW())`,
-      [
-        appointmentId,
-        appointmentData.patient_id,
-        appointmentData.doctor_id,
-        appointmentData.appointment_date,
-        appointmentData.appointment_time,
-        appointmentData.appointment_type || null,
-        appointmentData.appointment_location || null,
-        appointmentData.appointment_duration || 30,
-        appointmentData.notes || null,
-        createdBy
-      ]
+
+    const [requests] = await connection.query(
+      `SELECT * FROM AppointmentChangeRequests WHERE request_id = ?`,
+      [requestId]
     );
-    
-    // 3. Commit transaction
-    await connection.commit();
-    
-    // 4. ส่ง notification (ไม่ใช่ transaction เพราะถ้า fail ไม่ควร rollback appointment)
-    try {
-      // ดึงข้อมูล doctor
-      const [doctors] = await connection.query(
-        `SELECT first_name, last_name FROM DoctorProfiles WHERE doctor_id = ?`,
-        [appointmentData.doctor_id]
+    if (requests.length === 0) throw new Error('ไม่พบคำขอเลื่อนนัด');
+
+    const req = requests[0];
+    if (req.request_status !== 'pending') throw new Error('คำขอนี้ถูกดำเนินการแล้ว');
+
+    // อัปเดตสถานะใน AppointmentChangeRequests
+    await connection.query(
+      `UPDATE AppointmentChangeRequests SET
+         request_status = ?,
+         admin_notes    = COALESCE(?, admin_notes),
+         action_by_id   = ?,
+         action_date    = NOW()
+       WHERE request_id = ?`,
+      [newStatus, adminNotes, updatedBy, requestId]
+    );
+
+    // ถ้า approved → อัปเดตวันเวลาของ Appointments ด้วย
+    if (newStatus === 'approved') {
+      await connection.query(
+        `UPDATE Appointments SET
+           appointment_date   = ?,
+           appointment_time   = ?,
+           appointment_status = 'rescheduled',
+           updated_at         = NOW()
+         WHERE appointment_id = ?`,
+        [req.requested_new_date, req.requested_new_time, req.appointment_id]
       );
-      
-      const doctorName = doctors.length > 0 
-        ? `${doctors[0].first_name} ${doctors[0].last_name}`
-        : 'แพทย์';
-      
-      // สร้างและส่ง notification
-      await notificationService.createAndSendNotification({
-        userId: appointmentData.patient_id,
-        notificationType: 'appointment_created',
-        title: 'นัดหมายใหม่',
-        body: `คุณมีนัดพบ${doctorName} วันที่ ${appointmentData.appointment_date} เวลา ${appointmentData.appointment_time}`,
-        relatedEntityType: 'appointment',
-        relatedEntityId: appointmentId,
-        priority: 'medium',
-        data: {
-          appointment_id: appointmentId,
-          appointment_date: appointmentData.appointment_date,
-          appointment_time: appointmentData.appointment_time
-        }
-      });
-    } catch (notifError) {
-      console.error('Error sending appointment notification:', notifError);
-      // ไม่ throw error เพราะ appointment สร้างสำเร็จแล้ว
     }
-    
-    return appointmentId;
-    
+
+    await connection.commit();
+
+    // ส่ง notification แบบ non-blocking (ไม่กระทบ response)
+    sendRescheduleStatusNotification(requestId, newStatus, updatedBy, adminNotes)
+      .catch(err => console.error('❌ [Reschedule] Notification error:', err.message));
+
+    return {
+      success: true,
+      request_id: requestId,
+      new_status: newStatus,
+      message: newStatus === 'approved' ? 'อนุมัติการเลื่อนนัดสำเร็จ' : 'ปฏิเสธการเลื่อนนัดสำเร็จ',
+    };
+
   } catch (error) {
     await connection.rollback();
-    console.error('Error creating appointment:', error);
     throw error;
   } finally {
     connection.release();
   }
-}
-
-/**
- * อัปเดตสถานะนัดหมาย
- */
-async function updateAppointmentStatus(appointmentId, patientId, newStatus, cancellationReason = null) {
-  try {
-    const [result] = await db.query(
-      `UPDATE Appointments 
-       SET appointment_status = ?,
-           cancellation_reason = ?,
-           updated_at = NOW()
-       WHERE appointment_id = ? AND patient_id = ?`,
-      [newStatus, cancellationReason, appointmentId, patientId]
-    );
-    
-    if (result.affectedRows === 0) {
-      return false;
-    }
-    
-    // ส่ง notification ถ้ายกเลิก
-    if (newStatus === 'cancelled') {
-      try {
-        await notificationService.createAndSendNotification({
-          userId: patientId,
-          notificationType: 'appointment_cancelled',
-          title: 'นัดหมายถูกยกเลิก',
-          body: cancellationReason || 'นัดหมายของคุณถูกยกเลิก',
-          relatedEntityType: 'appointment',
-          relatedEntityId: appointmentId,
-          priority: 'high',
-          data: {
-            appointment_id: appointmentId,
-            status: 'cancelled'
-          }
-        });
-      } catch (notifError) {
-        console.error('Error sending cancellation notification:', notifError);
-      }
-    }
-    
-    return true;
-    
-  } catch (error) {
-    console.error('Error updating appointment status:', error);
-    throw error;
-  }
-}
-
-/**
- * ส่ง notification เตือนนัดหมาย (สำหรับ cron job)
- */
-async function sendAppointmentReminders() {
-  try {
-    // หานัดหมายที่จะมาในอีก 1 วัน
-    const tomorrow = new Date();
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    const tomorrowStr = tomorrow.toISOString().split('T')[0];
-    
-    const [appointments] = await db.query(
-      `SELECT 
-        a.appointment_id,
-        a.patient_id,
-        a.appointment_date,
-        a.appointment_time,
-        a.appointment_type,
-        a.appointment_location,
-        d.first_name as doctor_first_name,
-        d.last_name as doctor_last_name
-      FROM Appointments a
-      LEFT JOIN DoctorProfiles d ON a.doctor_id = d.doctor_id
-      WHERE a.appointment_date = ?
-        AND a.appointment_status = 'scheduled'`,
-      [tomorrowStr]
-    );
-    
-    console.log(`Found ${appointments.length} appointments for tomorrow`);
-    
-    // ส่ง notification ทีละนัด
-    for (const appt of appointments) {
-      try {
-        const doctorName = `${appt.doctor_first_name} ${appt.doctor_last_name}`;
-        
-        await notificationService.createAndSendNotification({
-          userId: appt.patient_id,
-          notificationType: 'appointment_reminder',
-          title: 'แจ้งเตือนนัดหมาย',
-          body: `พรุ่งนี้คุณมีนัดพบ${doctorName} เวลา ${appt.appointment_time} ที่ ${appt.appointment_location || 'คลินิก'}`,
-          relatedEntityType: 'appointment',
-          relatedEntityId: appt.appointment_id,
-          priority: 'high',
-          data: {
-            appointment_id: appt.appointment_id,
-            appointment_date: appt.appointment_date,
-            appointment_time: appt.appointment_time,
-            reminder_type: '1_day'
-          }
-        });
-        
-        console.log(`Sent reminder for appointment ${appt.appointment_id}`);
-        
-      } catch (error) {
-        console.error(`Error sending reminder for appointment ${appt.appointment_id}:`, error);
-      }
-    }
-    
-    return { success: true, count: appointments.length };
-    
-  } catch (error) {
-    console.error('Error in sendAppointmentReminders:', error);
-    throw error;
-  }
-}
+};
 
 module.exports = {
-  getPatientAppointments,
-  getAppointmentDetail,
-  createAppointment,
-  updateAppointmentStatus,
-  sendAppointmentReminders
+  sendAppointmentReminders,
+  sendRescheduleStatusNotification,
+  getUpcomingAppointments,
+  getRescheduleRequests,
+  createRescheduleRequest,
+  updateRescheduleRequestStatus,
 };

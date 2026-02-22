@@ -201,6 +201,9 @@ const generateUpcomingLogs = async (connection, scheduleId, patientId, medicatio
 
 /**
  * 10.1 อัปเดต Medication Schedule
+ * - อัปเดต MedicationSchedules
+ * - ถ้ามี dose_times ใหม่ → ลบของเก่าแล้ว insert ใหม่
+ * - ลบ MedicationLogs ที่ยัง pending ในอนาคตแล้ว regenerate ใหม่ให้ตรงเวลาใหม่
  */
 const updateSchedule = async (patientId, scheduleId, scheduleData) => {
   const connection = await db.getConnection();
@@ -218,8 +221,11 @@ const updateSchedule = async (patientId, scheduleId, scheduleData) => {
       throw new Error('ไม่พบตารางเวลาหรือคุณไม่มีสิทธิ์เข้าถึง');
     }
 
+    const existingSchedule = schedules[0];
+
     const {
       times_per_day,
+      dose_times,           // [{dose_time, dose_label, dose_order}] (optional)
       dose_spacing_minutes,
       end_date,
       sleep_mode_enabled,
@@ -231,7 +237,7 @@ const updateSchedule = async (patientId, scheduleId, scheduleData) => {
       notes
     } = scheduleData;
 
-    // อัปเดต schedule
+    // 1. อัปเดต MedicationSchedules
     await connection.query(
       `UPDATE MedicationSchedules SET
         times_per_day = COALESCE(?, times_per_day),
@@ -254,6 +260,56 @@ const updateSchedule = async (patientId, scheduleId, scheduleData) => {
       ]
     );
 
+    // 2. ถ้ามี dose_times ใหม่ส่งมา → อัปเดต MedicationDoseTimes
+    const hasDoseTimes = Array.isArray(dose_times) && dose_times.length > 0;
+    if (hasDoseTimes) {
+      // ลบของเก่าทั้งหมด แล้ว insert ใหม่
+      await connection.query(
+        `DELETE FROM MedicationDoseTimes WHERE schedule_id = ?`,
+        [scheduleId]
+      );
+
+      for (let i = 0; i < dose_times.length; i++) {
+        const doseTimeId = generateId('DOSE');
+        const { dose_time, dose_label } = dose_times[i];
+        await connection.query(
+          `INSERT INTO MedicationDoseTimes (
+            dose_time_id, schedule_id, dose_time, dose_label, dose_order, is_active
+          ) VALUES (?, ?, ?, ?, ?, 1)`,
+          [doseTimeId, scheduleId, dose_time, dose_label || `รอบที่ ${i + 1}`, i + 1]
+        );
+      }
+    }
+
+    // 3. ลบ MedicationLogs ที่ยัง pending/snoozed ในอนาคต แล้วสร้างใหม่
+    //    (เฉพาะกรณีเวลาเปลี่ยน หรือ sleep mode เปลี่ยน)
+    const timeOrSleepChanged = hasDoseTimes
+      || sleep_mode_enabled !== undefined
+      || sleep_start_time !== undefined
+      || sleep_end_time !== undefined;
+
+    if (timeOrSleepChanged) {
+      // ลบ logs อนาคตที่ยังไม่ได้หยอด
+      await connection.query(
+        `DELETE FROM MedicationLogs
+         WHERE schedule_id = ?
+           AND status IN ('pending', 'snoozed')
+           AND scheduled_datetime > NOW()`,
+        [scheduleId]
+      );
+
+      // Regenerate logs 7 วันข้างหน้าด้วยเวลาใหม่
+      const startDate = new Date().toISOString().split('T')[0];
+      await generateUpcomingLogs(
+        connection,
+        scheduleId,
+        patientId,
+        existingSchedule.medication_id,
+        startDate,
+        7
+      );
+    }
+
     await connection.commit();
 
     return {
@@ -266,6 +322,126 @@ const updateSchedule = async (patientId, scheduleId, scheduleData) => {
     throw error;
   } finally {
     connection.release();
+  }
+};
+
+/**
+ * ส่ง Medication Reminder (เรียกจาก cron ทุก 1 นาที)
+ * - ดึง MedicationLogs ที่ถึงเวลาแล้ว + ยังไม่ส่ง (notification_sent = 0)
+ * - เช็ค quiet hours ก่อนส่ง
+ * - ส่ง push notification แล้ว mark notification_sent = 1 ป้องกันส่งซ้ำ
+ */
+const sendMedicationReminders = async () => {
+  try {
+    const now = new Date();
+    // หน้าต่าง: ตั้งแต่ตอนนี้ไปถึง 1 นาทีข้างหน้า (ตรงกับ interval ของ cron)
+    const windowEnd = new Date(now.getTime() + 60 * 1000);
+
+    const nowStr = now.toISOString().slice(0, 19).replace('T', ' ');
+    const windowEndStr = windowEnd.toISOString().slice(0, 19).replace('T', ' ');
+
+    // ดึง logs ที่ถึงเวลาและยังไม่ได้ส่ง notification
+    const [logs] = await db.query(
+      `SELECT
+         ml.log_id,
+         ml.patient_id,
+         ml.medication_id,
+         ml.scheduled_datetime,
+         ml.snooze_until,
+         ml.status,
+         m.name AS medication_name,
+         ms.reminder_advance_minutes,
+         ms.sleep_mode_enabled,
+         ms.sleep_start_time,
+         ms.sleep_end_time
+       FROM MedicationLogs ml
+       JOIN MedicationSchedules ms ON ml.schedule_id = ms.schedule_id
+       JOIN Medications m ON ml.medication_id = m.medication_id
+       WHERE ml.status IN ('pending', 'snoozed')
+         AND ml.notification_sent = 0
+         AND ms.is_active = 1
+         AND (
+           -- pending: แจ้งเตือนล่วงหน้าตามที่ตั้งไว้
+           (ml.status = 'pending'
+            AND DATE_SUB(ml.scheduled_datetime, INTERVAL ms.reminder_advance_minutes MINUTE)
+                BETWEEN ? AND ?)
+           OR
+           -- snoozed: แจ้งเตือนเมื่อ snooze_until ถึงแล้ว
+           (ml.status = 'snoozed'
+            AND ml.snooze_until BETWEEN ? AND ?)
+         )`,
+      [nowStr, windowEndStr, nowStr, windowEndStr]
+    );
+
+    if (logs.length === 0) return { count: 0 };
+
+    const pushNotificationService = require('./pushNotification.service');
+    const notificationService = require('./notification.service');
+    let sentCount = 0;
+
+    for (const log of logs) {
+      try {
+        // 1. เช็ค quiet hours (sleep mode)
+        if (log.sleep_mode_enabled) {
+          const currentTime = now.toTimeString().substring(0, 8); // HH:MM:SS
+          const inSleep = isWithinSleepMode(
+            currentTime,
+            log.sleep_mode_enabled,
+            log.sleep_start_time,
+            log.sleep_end_time
+          );
+          if (inSleep) {
+            console.log(`⏸️ [Reminder] Skipped (quiet hours): patient ${log.patient_id}`);
+            continue;
+          }
+        }
+
+        // 2. สร้าง notification message
+        const scheduledTime = new Date(log.scheduled_datetime)
+          .toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', hour12: false });
+
+        const title = '💊 เวลาหยอดยา';
+        const body = `ถึงเวลาหยอดยา ${log.medication_name} (${scheduledTime} น.)`;
+
+        // 3. บันทึก notification ลง DB + ส่ง push
+        await notificationService.createAndSendNotification({
+          userId: log.patient_id,
+          type: 'medication',
+          title,
+          body,
+          relatedType: 'medication_log',
+          relatedId: log.log_id,
+          priority: 'high',
+          data: {
+            log_id: log.log_id,
+            medication_name: log.medication_name,
+            scheduled_datetime: log.scheduled_datetime,
+          },
+          sendPush: true,
+        });
+
+        // 4. Mark notification_sent = 1 ป้องกันส่งซ้ำ
+        await db.query(
+          `UPDATE MedicationLogs
+           SET notification_sent = 1, notification_sent_at = NOW()
+           WHERE log_id = ?`,
+          [log.log_id]
+        );
+
+        sentCount++;
+        console.log(`✅ [Reminder] Sent: ${log.medication_name} → patient ${log.patient_id}`);
+
+      } catch (err) {
+        console.error(`❌ [Reminder] Failed for log ${log.log_id}:`, err.message);
+        // ไม่ throw เพื่อให้ loop ทำงานต่อสำหรับ log อื่น
+      }
+    }
+
+    return { count: sentCount };
+
+  } catch (error) {
+    console.error('❌ [sendMedicationReminders] Error:', error);
+    throw error;
   }
 };
 
@@ -1050,6 +1226,7 @@ const deleteSchedule = async (patientId, scheduleId) => {
 module.exports = {
   createSchedule,
   updateSchedule,
+  sendMedicationReminders,   // ✅ เพิ่มใหม่ — เรียกจาก cron ทุก 1 นาที
   getUpcomingDoses,
   confirmDose,
   skipDose,

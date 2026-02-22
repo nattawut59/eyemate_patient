@@ -69,6 +69,9 @@ async function sendPushNotification(userId, notification) {
       }
     }
     
+    // 4. ตรวจสอบ tickets และ deactivate token ที่ไม่ valid
+    await handlePushTickets(tickets, pushTokens);
+
     // 5. บันทึก log
     await logNotificationHistory(userId, notification, tickets);
     
@@ -77,6 +80,42 @@ async function sendPushNotification(userId, notification) {
   } catch (error) {
     console.error('Error sending push notification:', error);
     return { success: false, error: error.message };
+  }
+}
+
+/**
+ * ตรวจสอบ tickets หลังส่ง push
+ * - ถ้า status = 'error' และ error = 'DeviceNotRegistered'
+ *   → deactivate token นั้นใน DB ป้องกันส่งซ้ำรอบหน้า
+ */
+async function handlePushTickets(tickets, pushTokens) {
+  try {
+    for (let i = 0; i < tickets.length; i++) {
+      const ticket = tickets[i];
+      const token = pushTokens[i];
+
+      if (!ticket || !token) continue;
+
+      if (ticket.status === 'error') {
+        const errorType = ticket.details?.error;
+        console.warn(`⚠️ [Push] Ticket error for token ${token}: ${errorType}`);
+
+        if (errorType === 'DeviceNotRegistered') {
+          // ผู้ใช้ถอนสิทธิ์หรือ uninstall app แล้ว → deactivate token
+          await db.query(
+            `UPDATE PushTokens SET is_active = 0 WHERE expo_push_token = ?`,
+            [token]
+          );
+          console.log(`🗑️ [Push] Token deactivated (DeviceNotRegistered): ${token}`);
+
+        } else if (errorType === 'InvalidCredentials') {
+          // FCM/APNs credentials หมดอายุ → log warning ให้ทีม dev ดู
+          console.error('❌ [Push] Invalid credentials — ตรวจสอบ FCM/APNs config');
+        }
+      }
+    }
+  } catch (error) {
+    console.error('❌ [Push] handlePushTickets error:', error);
   }
 }
 
@@ -147,7 +186,11 @@ async function canSendNotification(userId, notificationType) {
     // เช็ค Quiet Hours (ไม่รบกวนตอนกลางคืน)
     if (config.quiet_hours_enabled) {
       const now = new Date();
-      const currentTime = now.toTimeString().split(' ')[0]; // HH:MM:SS
+      // ✅ แก้: ใช้ explicit format แทน toTimeString() ที่อาจต่างกันบาง platform
+      const hh = now.getHours().toString().padStart(2, '0');
+      const mm = now.getMinutes().toString().padStart(2, '0');
+      const ss = now.getSeconds().toString().padStart(2, '0');
+      const currentTime = `${hh}:${mm}:${ss}`;
       
       const start = config.quiet_hours_start;
       const end = config.quiet_hours_end;

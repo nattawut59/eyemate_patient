@@ -35,6 +35,18 @@ router.get('/unread-count',
 );
 
 /**
+ * Mark all as read
+ * PUT /api/notifications/read-all
+ * ⚠️ ต้องอยู่ก่อน /:notificationId/read เสมอ
+ *    ไม่งั้น Express จะ match "read-all" เป็น :notificationId แทน
+ */
+router.put('/read-all',
+  verifyToken,
+  verifyRole(['patient']),
+  notificationController.markAllAsRead
+);
+
+/**
  * Mark notification as read
  * PUT /api/notifications/:notificationId/read
  */
@@ -42,16 +54,6 @@ router.put('/:notificationId/read',
   verifyToken,
   verifyRole(['patient']),
   notificationController.markAsRead
-);
-
-/**
- * Mark all as read
- * PUT /api/notifications/read-all
- */
-router.put('/read-all',
-  verifyToken,
-  verifyRole(['patient']),
-  notificationController.markAllAsRead
 );
 
 /**
