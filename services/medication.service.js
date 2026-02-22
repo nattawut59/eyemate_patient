@@ -353,54 +353,101 @@ class MedicationService {
    * @returns {object} รายละเอียดยา
    */
   async getMedicationDetail(patientId, prescriptionId) {
-    try {
-      console.log(`[Service] Getting medication detail: ${prescriptionId}`);
-      
-      const [medications] = await db.query(
-        `SELECT 
-          pm.prescription_id,
-          pm.medication_id,
-          m.name as medication_name,
-          m.generic_name,
-          m.strength,
-          m.form as dosage_form,
-          m.manufacturer,
-          m.description,
-          m.side_effects,
-          m.contraindications,
-          m.interactions,
-          pm.eye,
-          pm.dosage,
-          pm.frequency,
-          pm.duration,
-          pm.special_instructions,
-          pm.status,
-          pm.last_dispensed_date,
-          pm.quantity_dispensed,
-          pm.refills,
-          pm.created_at,
-          d.first_name as doctor_first_name,
-          d.last_name as doctor_last_name,
-          d.license_number
-        FROM PatientMedications pm
-        INNER JOIN Medications m ON pm.medication_id = m.medication_id
-        LEFT JOIN DoctorProfiles d ON pm.doctor_id = d.doctor_id
-        WHERE pm.prescription_id = ?
-          AND pm.patient_id = ?`,
-        [prescriptionId, patientId]
-      );
-      
-      if (medications.length === 0) {
-        throw new Error('ไม่พบข้อมูลยา');
-      }
-      
-      return medications[0];
-      
-    } catch (error) {
-      console.error('[Service] Error getting medication detail:', error.message);
-      throw error;
+  try {
+    console.log(`[Service] Getting medication detail: ${prescriptionId}`);
+    
+    const [medications] = await db.query(
+      `SELECT 
+        pm.prescription_id,
+        pm.medication_id,
+        m.name as medication_name,
+        m.generic_name,
+        m.strength,
+        m.form as dosage_form,
+        m.manufacturer,
+        m.description,
+        m.side_effects,
+        m.contraindications,
+        m.interactions,
+        pm.eye,
+        pm.dosage,
+        pm.frequency,
+        pm.duration,
+        pm.special_instructions,
+        pm.status,
+        pm.last_dispensed_date,
+        pm.quantity_dispensed,
+        pm.refills,
+        pm.created_at,
+        d.first_name as doctor_first_name,
+        d.last_name as doctor_last_name,
+        d.license_number
+      FROM PatientMedications pm
+      INNER JOIN Medications m ON pm.medication_id = m.medication_id
+      LEFT JOIN DoctorProfiles d ON pm.doctor_id = d.doctor_id
+      WHERE pm.prescription_id = ?
+        AND pm.patient_id = ?`,
+      [prescriptionId, patientId]
+    );
+    
+    if (medications.length === 0) {
+      throw new Error('ไม่พบข้อมูลยา');
     }
+
+    const medication = medications[0];
+
+    // ✅ เพิ่ม: ดึง schedule + dose_times
+    const [schedules] = await db.query(
+      `SELECT
+        ms.schedule_id,
+        ms.frequency_type,
+        ms.times_per_day,
+        ms.sleep_mode_enabled,
+        ms.sleep_start_time,
+        ms.sleep_end_time,
+        ms.reminder_advance_minutes,
+        ms.start_date,
+        ms.is_active
+      FROM MedicationSchedules ms
+      WHERE ms.prescription_id = ?
+        AND ms.patient_id = ?
+        AND ms.is_active = 1
+      ORDER BY ms.created_at DESC
+      LIMIT 1`,
+      [prescriptionId, patientId]
+    );
+
+    let schedule = null;
+
+    if (schedules.length > 0) {
+      schedule = schedules[0];
+
+      const [doseTimes] = await db.query(
+        `SELECT
+          dose_time_id,
+          dose_time,
+          dose_label,
+          dose_order
+        FROM MedicationDoseTimes
+        WHERE schedule_id = ?
+        ORDER BY dose_order ASC`,
+        [schedule.schedule_id]
+      );
+
+      schedule.dose_times = doseTimes;
+      schedule.sleep_mode_enabled = schedule.sleep_mode_enabled === 1;
+      schedule.is_active = schedule.is_active === 1;
+    }
+
+    return {
+      ...medication,
+      schedule, // null ถ้ายังไม่ได้ตั้งค่า
+    };
+    
+  } catch (error) {
+    console.error('[Service] Error getting medication detail:', error.message);
+    throw error;
   }
 }
-
+}
 module.exports = new MedicationService();
