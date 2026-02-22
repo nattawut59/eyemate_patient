@@ -454,6 +454,29 @@ const deleteSchedule = async (req, res) => {
   }
 };
 
+/**
+ * ดึงรายการยาวันนี้
+ * GET /api/patients/medication-reminders/today
+ */
+const getTodayReminders = async (req, res) => {
+  try {
+    const patientId = req.user.userId;
+    const result = await medicationReminderService.getTodayReminders(patientId);
+
+    return res.json({
+      success: true,
+      data: result
+    });
+
+  } catch (error) {
+    console.error('Error in getTodayReminders:', error.message);
+    return res.status(500).json({
+      success: false,
+      error: 'เกิดข้อผิดพลาดในการดึงรายการยาวันนี้'
+    });
+  }
+};
+
 module.exports = {
   createSchedule,
   updateSchedule,
@@ -470,5 +493,6 @@ module.exports = {
   getComplianceReport,
   getNotificationHistory,
   getAllSchedules,
-  deleteSchedule
+  deleteSchedule,
+  getTodayReminders
 };

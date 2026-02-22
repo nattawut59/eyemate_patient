@@ -109,4 +109,11 @@ router.delete('/schedules/:scheduleId',
   medicationReminderController.deleteSchedule
 );
 
+/**
+ * ดึงรายการยาวันนี้สำหรับ HomeScreen
+ */
+router.get('/today',
+  medicationReminderController.getTodayReminders
+);
+
 module.exports = router;

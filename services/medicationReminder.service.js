@@ -1223,6 +1223,62 @@ const deleteSchedule = async (patientId, scheduleId) => {
   }
 };
 
+/**
+ * ดึงรายการยาวันนี้สำหรับ HomeScreen
+ * GET /api/patients/medication-reminders/today
+ */
+const getTodayReminders = async (patientId) => {
+  try {
+    const today = new Date().toISOString().split('T')[0];
+    const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+
+    const [logs] = await db.query(
+      `SELECT
+        ml.log_id AS reminder_id,
+        ml.scheduled_datetime,
+        TIME(ml.scheduled_datetime) AS scheduled_time,
+        ml.status,
+        ml.actual_datetime,
+        m.name AS medication_name,
+        m.medication_id,
+        pm.eye,
+        pm.dosage,
+        dt.dose_label
+      FROM MedicationLogs ml
+      JOIN MedicationSchedules ms ON ml.schedule_id = ms.schedule_id
+      JOIN Medications m ON ml.medication_id = m.medication_id
+      JOIN PatientMedications pm ON ms.prescription_id = pm.prescription_id
+      LEFT JOIN MedicationDoseTimes dt ON ml.dose_time_id = dt.dose_time_id
+      WHERE ml.patient_id = ?
+        AND DATE(ml.scheduled_datetime) = ?
+        AND ms.is_active = 1
+        AND ml.status IN ('pending', 'completed', 'snoozed')
+      ORDER BY ml.scheduled_datetime ASC`,
+      [patientId, today]
+    );
+
+    return {
+      date: today,
+      reminders: logs.map(log => ({
+        reminder_id: log.reminder_id,
+        medication_name: log.medication_name,
+        medication_id: log.medication_id,
+        scheduled_time: log.scheduled_time,
+        scheduled_datetime: log.scheduled_datetime,
+        dose_label: log.dose_label,
+        eye: log.eye,
+        dosage: log.dosage,
+        status: log.status === 'completed' ? 'completed' : 'pending',
+        actual_datetime: log.actual_datetime,
+      }))
+    };
+
+  } catch (error) {
+    console.error('[Service] Error getTodayReminders:', error.message);
+    throw error;
+  }
+};
+
 module.exports = {
   createSchedule,
   updateSchedule,
@@ -1233,6 +1289,7 @@ module.exports = {
   snoozeDose,
   adjustDoseTime,
   updateSleepMode,
+  getTodayReminders,
   checkDoseCollision,
   getNotificationSettings,
   updateNotificationSettings,
