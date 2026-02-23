@@ -90,34 +90,30 @@ class MedicationService {
    * ดึงบันทึกการใช้ยาจริง (MedicationUsageRecords)
    */
   async getMedicationUsageRecords(patientId, date) {
-    try {
-      const [records] = await db.query(
-        `SELECT 
-          mur.record_id,
-          mur.reminder_id,
-          mur.medication_id,
-          mur.scheduled_time,
-          mur.actual_time,
-          mur.status,
-          mur.eye,
-          mur.drops_count,
-          m.name as medication_name
-        FROM MedicationUsageRecords mur
-        INNER JOIN Medications m ON mur.medication_id = m.medication_id
-        WHERE mur.patient_id = ?
-          AND DATE(mur.scheduled_time) = ?
-        ORDER BY mur.scheduled_time ASC`,
-        [patientId, date]
-      );
-      
-      console.log(`[Service] Found ${records.length} usage records for ${date}`);
-      return records;
-      
-    } catch (error) {
-      console.error('[Service] Error getting usage records:', error.message);
-      throw error;
-    }
+  try {
+    const [records] = await db.query(
+      `SELECT 
+        ml.log_id as record_id,
+        ml.schedule_id as reminder_id,
+        ml.medication_id,
+        ml.scheduled_datetime as scheduled_time,
+        ml.actual_datetime as actual_time,
+        ml.status,
+        ml.notes
+      FROM MedicationLogs ml
+      WHERE ml.patient_id = ?
+        AND DATE(CONVERT_TZ(ml.scheduled_datetime, '+00:00', '+07:00')) = ?
+      ORDER BY ml.scheduled_datetime ASC`,
+      [patientId, date]
+    );
+    
+    console.log(`[Service] Found ${records.length} usage records for ${date}`);
+    return records;
+  } catch (error) {
+    console.error('[Service] Error getting usage records:', error.message);
+    throw error;
   }
+}
   
   /**
    * แยกยาตามรอบเวลา (เช้า/บ่าย/เย็น)
@@ -126,81 +122,74 @@ class MedicationService {
    * เย็น: 18:00-05:59
    */
   categorizeByTimeSlot(reminders, usageRecords) {
-    // สร้าง Map เพื่อค้นหา usage record ได้เร็ว
-    const usageMap = new Map();
-    usageRecords.forEach(record => {
-      const key = `${record.reminder_id}_${record.medication_id}`;
-      usageMap.set(key, record);
-    });
+  // ✅ เปลี่ยน key เป็น schedule_id เพราะ MedicationLogs ใช้ schedule_id
+  const usageMap = new Map();
+  usageRecords.forEach(record => {
+    usageMap.set(record.reminder_id, record); // reminder_id = schedule_id
+  });
+  
+  const slots = {
+    morning: { medications: [], scheduled_count: 0, completed_count: 0 },
+    afternoon: { medications: [], scheduled_count: 0, completed_count: 0 },
+    evening: { medications: [], scheduled_count: 0, completed_count: 0 }
+  };
+  
+  reminders.forEach(reminder => {
+    const hour = parseInt(reminder.reminder_time.split(':')[0]);
+    let slot;
     
-    const slots = {
-      morning: { medications: [], scheduled_count: 0, completed_count: 0 },
-      afternoon: { medications: [], scheduled_count: 0, completed_count: 0 },
-      evening: { medications: [], scheduled_count: 0, completed_count: 0 }
+    if (hour >= 6 && hour < 12) {
+      slot = 'morning';
+    } else if (hour >= 12 && hour < 18) {
+      slot = 'afternoon';
+    } else {
+      slot = 'evening';
+    }
+    
+    // ✅ เปลี่ยน key เป็น reminder_id เพียวๆ
+    const usage = usageMap.get(reminder.reminder_id);
+    
+    const medData = {
+      reminder_id: reminder.reminder_id,
+      medication_id: reminder.medication_id,
+      medication_name: reminder.medication_name,
+      generic_name: reminder.generic_name,
+      scheduled_time: reminder.reminder_time,
+      eye: reminder.eye,
+      drops_count: reminder.drops_count,
+      status: usage?.status || 'pending',
+      actual_time: usage?.actual_time || null
     };
     
-    // แยกยาแต่ละตัวตามรอบเวลา
-    reminders.forEach(reminder => {
-      const hour = parseInt(reminder.reminder_time.split(':')[0]);
-      let slot;
-      
-      // กำหนดรอบเวลา
-      if (hour >= 6 && hour < 12) {
-        slot = 'morning';
-      } else if (hour >= 12 && hour < 18) {
-        slot = 'afternoon';
-      } else {
-        slot = 'evening';
-      }
-      
-      // ค้นหา usage record ที่ตรงกัน
-      const key = `${reminder.reminder_id}_${reminder.medication_id}`;
-      const usage = usageMap.get(key);
-      
-      // สร้างข้อมูลยาแต่ละตัว
-      const medData = {
-        reminder_id: reminder.reminder_id,
-        medication_id: reminder.medication_id,
-        medication_name: reminder.medication_name,
-        generic_name: reminder.generic_name,
-        scheduled_time: reminder.reminder_time,
-        eye: reminder.eye,
-        drops_count: reminder.drops_count,
-        status: usage?.status || 'pending',
-        actual_time: usage?.actual_time || null
-      };
-      
-      slots[slot].medications.push(medData);
-      slots[slot].scheduled_count++;
-      
-      // นับจำนวนที่หยอดจริง (status = 'taken')
-      if (usage?.status === 'taken') {
-        slots[slot].completed_count++;
-      }
-    });
+    slots[slot].medications.push(medData);
+    slots[slot].scheduled_count++;
     
-    // คำนวณสถานะของแต่ละรอบ
-    Object.keys(slots).forEach(slotName => {
-      const slot = slots[slotName];
-      
-      if (slot.scheduled_count === 0) {
-        slot.status = 'no_medication'; // ไม่มียาในรอบนี้
-      } else if (slot.completed_count === slot.scheduled_count) {
-        slot.status = 'completed'; // 🟢 หยอดครบทุกตัว
-      } else if (slot.completed_count > 0) {
-        slot.status = 'partial'; // 🟡 หยอดบางตัว
-      } else {
-        slot.status = 'missed'; // 🔴 ไม่ได้หยอดเลย
-      }
-      
-      // คำนวณ compliance rate ของรอบนี้
-      slot.compliance_rate = slot.scheduled_count > 0 
-        ? ((slot.completed_count / slot.scheduled_count) * 100).toFixed(2)
-        : 0;
-    });
+    // ✅ เปลี่ยนจาก 'taken' เป็น 'completed'
+    if (usage?.status === 'completed') {
+      slots[slot].completed_count++;
+    }
+  });
+  
+  Object.keys(slots).forEach(slotName => {
+    const slot = slots[slotName];
     
-    return slots;
-  }
+    if (slot.scheduled_count === 0) {
+      slot.status = 'no_medication';
+    } else if (slot.completed_count === slot.scheduled_count) {
+      slot.status = 'completed';
+    } else if (slot.completed_count > 0) {
+      slot.status = 'partial';
+    } else {
+      slot.status = 'missed';
+    }
+    
+    slot.compliance_rate = slot.scheduled_count > 0
+      ? ((slot.completed_count / slot.scheduled_count) * 100).toFixed(2)
+      : 0;
+  });
+  
+  return slots;
+}
   
   /**
    * คำนวณ Overall Compliance (เฉลี่ยจากทุกรอบ)
