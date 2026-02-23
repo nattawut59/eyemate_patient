@@ -1258,20 +1258,27 @@ const getTodayReminders = async (patientId) => {
     );
 
     return {
-      date: today,
-      reminders: logs.map(log => ({
-        reminder_id: log.reminder_id,
-        medication_name: log.medication_name,
-        medication_id: log.medication_id,
-        scheduled_time: log.scheduled_time,
-        scheduled_datetime: log.scheduled_datetime,
-        dose_label: log.dose_label,
-        eye: log.eye,
-        dosage: log.dosage,
-        status: log.status === 'completed' ? 'completed' : 'pending',
-        actual_datetime: log.actual_datetime,
-      }))
+  date: today,
+  reminders: logs.map(log => {
+    const dt = new Date(log.scheduled_datetime);
+    const bangkokTime = dt.toLocaleTimeString('th-TH', {
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hour12: false, timeZone: 'Asia/Bangkok'
+    });
+    return {
+      reminder_id: log.reminder_id,
+      medication_name: log.medication_name,
+      medication_id: log.medication_id,
+      scheduled_time: bangkokTime,        // ✅ เปลี่ยนจาก log.scheduled_time
+      scheduled_datetime: log.scheduled_datetime,
+      dose_label: log.dose_label,
+      eye: log.eye,
+      dosage: log.dosage,
+      status: log.status === 'completed' ? 'completed' : 'pending',
+      actual_datetime: log.actual_datetime,
     };
+  })
+};
 
   } catch (error) {
     console.error('[Service] Error getTodayReminders:', error.message);
