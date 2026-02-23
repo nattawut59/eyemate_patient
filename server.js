@@ -1,18 +1,17 @@
 // server.js
-require('dotenv').config({ debug: false, override: false }); 
+require('dotenv').config({ debug: false, override: false });
 const app = require('./app');
-const db = require('./config/database.config'); // ✅ เพิ่มบรรทัดนี้
+const db = require('./config/database.config');
 
-const PORT = process.env.PORT || 3002;
+const PORT = Number(process.env.PORT) || 8080;
 
-// Start Server
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, "0.0.0.0", () => {
   console.log('===========================================');
   console.log('✅ EyeMate API Server Started');
   console.log('===========================================');
   console.log(`📍 Port: ${PORT}`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`🔗 Health Check: http://localhost:${PORT}/health`);
+  console.log(`🔗 Health Check: /health`);
   console.log('===========================================');
 });
 
