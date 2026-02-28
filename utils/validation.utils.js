@@ -91,7 +91,7 @@ function validatePassword(password) {
 // 3. เบอร์โทรศัพท์ (Phone Number)
 // ============================================
 
-const PHONE_REGEX = /^0[89][0-9]{8}$/;
+const PHONE_REGEX = /^0[6-9][0-9]{8}$/;
 
 /**
  * ตรวจสอบเบอร์โทรศัพท์ไทย
