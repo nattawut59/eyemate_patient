@@ -54,11 +54,11 @@ class MedicationService {
     }
   }
   
-  // ✅ แก้: join MedicationReminders เพื่อเชื่อม reminder_time กับ log
   async getMedicationUsageRecords(patientId, date) {
     try {
       const [records] = await db.query(
         `SELECT 
+          ml.log_id,
           ml.log_id as record_id,
           ml.medication_id,
           ml.scheduled_datetime as scheduled_time,
@@ -86,8 +86,8 @@ class MedicationService {
     }
   }
   
-  // ✅ แก้: ใช้ reminder_time เป็น key แทน reminder_id
   categorizeByTimeSlot(reminders, usageRecords) {
+    // ✅ map ด้วย reminder_time → เก็บ log_id ด้วย
     const usageMap = new Map();
     usageRecords.forEach(record => {
       const time = new Date(record.scheduled_time)
@@ -96,6 +96,10 @@ class MedicationService {
           hour12: false, timeZone: 'Asia/Bangkok'
         });
       usageMap.set(time, record);
+      // ✅ map ด้วย reminder_time ด้วย (fallback)
+      if (record.reminder_time) {
+        usageMap.set(record.reminder_time, record);
+      }
     });
     
     const slots = {
@@ -111,11 +115,12 @@ class MedicationService {
       else if (hour >= 12 && hour < 18) slot = 'afternoon';
       else                               slot = 'evening';
       
-      // ✅ match ด้วย reminder_time (HH:MM:SS)
       const usage = usageMap.get(reminder.reminder_time);
       
       slots[slot].medications.push({
-        reminder_id: reminder.reminder_id,
+        // ✅ ส่ง log_id กลับไปด้วย — frontend ใช้กดหยอดยา
+        reminder_id: usage?.log_id || reminder.reminder_id,
+        log_id: usage?.log_id || null,
         medication_id: reminder.medication_id,
         medication_name: reminder.medication_name,
         generic_name: reminder.generic_name,
@@ -212,8 +217,6 @@ class MedicationService {
         [patientId]
       );
       
-      console.log(`[Service] Found ${medications.length} active medications`);
-      
       const result = medications.map(med => {
         let timesPerDay = 0;
         const freq = (med.frequency || '').toLowerCase();
@@ -247,24 +250,14 @@ class MedicationService {
         };
       });
 
-      // ✅ ดึง schedule + dose_times สำหรับแต่ละยา
       for (const med of result) {
         const [schedules] = await db.query(
-          `SELECT
-            ms.schedule_id,
-            ms.frequency_type,
-            ms.times_per_day,
-            ms.sleep_mode_enabled,
-            ms.sleep_start_time,
-            ms.sleep_end_time,
-            ms.reminder_advance_minutes,
-            ms.is_active
+          `SELECT ms.schedule_id, ms.frequency_type, ms.times_per_day,
+            ms.sleep_mode_enabled, ms.sleep_start_time, ms.sleep_end_time,
+            ms.reminder_advance_minutes, ms.is_active
           FROM MedicationSchedules ms
-          WHERE ms.prescription_id = ?
-            AND ms.patient_id = ?
-            AND ms.is_active = 1
-          ORDER BY ms.created_at DESC
-          LIMIT 1`,
+          WHERE ms.prescription_id = ? AND ms.patient_id = ? AND ms.is_active = 1
+          ORDER BY ms.created_at DESC LIMIT 1`,
           [med.patient_medication_id, patientId]
         );
 
@@ -272,9 +265,7 @@ class MedicationService {
           const schedule = schedules[0];
           const [doseTimes] = await db.query(
             `SELECT dose_time_id, dose_time, dose_label, dose_order
-             FROM MedicationDoseTimes
-             WHERE schedule_id = ?
-             ORDER BY dose_order ASC`,
+             FROM MedicationDoseTimes WHERE schedule_id = ? ORDER BY dose_order ASC`,
             [schedule.schedule_id]
           );
           schedule.dose_times = doseTimes;
@@ -294,63 +285,33 @@ class MedicationService {
 
   async getMedicationDetail(patientId, prescriptionId) {
     try {
-      console.log(`[Service] Getting medication detail: ${prescriptionId}`);
-      
       const [medications] = await db.query(
         `SELECT 
-          pm.prescription_id,
-          pm.medication_id,
-          m.name as medication_name,
-          m.generic_name,
-          m.strength,
-          m.form as dosage_form,
-          m.manufacturer,
-          m.description,
-          m.side_effects,
-          m.contraindications,
-          m.interactions,
-          pm.eye,
-          pm.dosage,
-          pm.frequency,
-          pm.duration,
-          pm.special_instructions,
-          pm.status,
-          pm.last_dispensed_date,
-          pm.quantity_dispensed,
-          pm.refills,
-          pm.created_at,
-          d.first_name as doctor_first_name,
-          d.last_name as doctor_last_name,
-          d.license_number
+          pm.prescription_id, pm.medication_id,
+          m.name as medication_name, m.generic_name, m.strength,
+          m.form as dosage_form, m.manufacturer, m.description,
+          m.side_effects, m.contraindications, m.interactions,
+          pm.eye, pm.dosage, pm.frequency, pm.duration,
+          pm.special_instructions, pm.status, pm.last_dispensed_date,
+          pm.quantity_dispensed, pm.refills, pm.created_at,
+          d.first_name as doctor_first_name, d.last_name as doctor_last_name, d.license_number
         FROM PatientMedications pm
         INNER JOIN Medications m ON pm.medication_id = m.medication_id
         LEFT JOIN DoctorProfiles d ON pm.doctor_id = d.doctor_id
-        WHERE pm.prescription_id = ?
-          AND pm.patient_id = ?`,
+        WHERE pm.prescription_id = ? AND pm.patient_id = ?`,
         [prescriptionId, patientId]
       );
       
       if (medications.length === 0) throw new Error('ไม่พบข้อมูลยา');
 
       const medication = medications[0];
-
       const [schedules] = await db.query(
-        `SELECT
-          ms.schedule_id,
-          ms.frequency_type,
-          ms.times_per_day,
-          ms.sleep_mode_enabled,
-          ms.sleep_start_time,
-          ms.sleep_end_time,
-          ms.reminder_advance_minutes,
-          ms.start_date,
-          ms.is_active
+        `SELECT ms.schedule_id, ms.frequency_type, ms.times_per_day,
+          ms.sleep_mode_enabled, ms.sleep_start_time, ms.sleep_end_time,
+          ms.reminder_advance_minutes, ms.start_date, ms.is_active
         FROM MedicationSchedules ms
-        WHERE ms.prescription_id = ?
-          AND ms.patient_id = ?
-          AND ms.is_active = 1
-        ORDER BY ms.created_at DESC
-        LIMIT 1`,
+        WHERE ms.prescription_id = ? AND ms.patient_id = ? AND ms.is_active = 1
+        ORDER BY ms.created_at DESC LIMIT 1`,
         [prescriptionId, patientId]
       );
 
@@ -359,9 +320,7 @@ class MedicationService {
         schedule = schedules[0];
         const [doseTimes] = await db.query(
           `SELECT dose_time_id, dose_time, dose_label, dose_order
-           FROM MedicationDoseTimes
-           WHERE schedule_id = ?
-           ORDER BY dose_order ASC`,
+           FROM MedicationDoseTimes WHERE schedule_id = ? ORDER BY dose_order ASC`,
           [schedule.schedule_id]
         );
         schedule.dose_times = doseTimes;
