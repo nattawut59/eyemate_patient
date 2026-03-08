@@ -347,8 +347,8 @@ const validateAppointmentRequest = [
     .trim()
     .notEmpty()
     .withMessage('กรุณาระบุเวลาที่ต้องการนัด')
-    .custom((value) => {
-      const result = validateAppointmentTime(value);
+    .custom((value, { req }) => {
+      const result = validateAppointmentTime(value, req.body.requested_date);
       if (!result.valid) {
         throw new Error(result.message);
       }
