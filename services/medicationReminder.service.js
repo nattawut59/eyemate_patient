@@ -137,7 +137,9 @@ const generateUpcomingLogs = async (connection, scheduleId, patientId, medicatio
     if (schedule.frequency_type === 'fixed_times') {
       // สร้าง log ตาม dose_times
       for (const doseTime of doseTimes) {
-        const scheduledDatetime = `${dateStr} ${doseTime.dose_time}`;
+        const localDate = new Date(`${dateStr}T${doseTime.dose_time}`);
+        localDate.setHours(localDate.getHours() - 7);
+        const scheduledDatetime = localDate.toISOString().slice(0, 19).replace('T', ' ');
 
         // ตรวจสอบว่าอยู่ใน sleep mode หรือไม่
         const inSleepMode = isWithinSleepMode(
