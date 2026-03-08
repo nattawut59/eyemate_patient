@@ -1209,9 +1209,13 @@ const deleteSchedule = async (patientId, scheduleId) => {
 
     // ลบ (cascade จะลบ dose_times และ logs ด้วย)
     await connection.query(
-      `DELETE FROM MedicationSchedules WHERE schedule_id = ?`,
+      `UPDATE MedicationLogs 
+       SET status = 'cancelled'
+       WHERE schedule_id = ?
+         AND status IN ('pending', 'snoozed')`,
       [scheduleId]
     );
+
 
     await connection.commit();
 
