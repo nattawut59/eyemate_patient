@@ -296,7 +296,7 @@ const updateSchedule = async (patientId, scheduleId, scheduleData) => {
         `DELETE FROM MedicationLogs
          WHERE schedule_id = ?
            AND status IN ('pending', 'snoozed')
-           AND scheduled_datetime > NOW()`,
+           AND scheduled_datetime > CURDATE()`,
         [scheduleId]
       );
 
