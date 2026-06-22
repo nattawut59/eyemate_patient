@@ -105,8 +105,10 @@ const medicalDocumentRoutes = require('./routes/medicalDocument.routes');
 const medicationReminderRoutes = require('./routes/medicationReminder.routes');
 const notificationRoutes = require('./routes/notification.routes');
 const appointmentRoutes = require('./routes/appointment.routes');
-const { startMedicationRemindersCron } = require('./cron/medicationReminders.cron');
-startMedicationRemindersCron();
+if (!process.env.VERCEL) {
+  const { startMedicationRemindersCron } = require('./cron/medicationReminders.cron');
+  startMedicationRemindersCron();
+}
 
 app.use('/api/auth', authRoutes);
 app.use('/api/patients', patientRoutes);
@@ -162,8 +164,10 @@ app.use((err, req, res, next) => {
 // ============================================
 // Export App (ไม่ start server ที่นี่)
 // ============================================
-const { startAppointmentRemindersCron } = require('./cron/appointmentReminders.cron');
-startAppointmentRemindersCron();
+if (!process.env.VERCEL) {
+  const { startAppointmentRemindersCron } = require('./cron/appointmentReminders.cron');
+  startAppointmentRemindersCron();
+}
 
 
 module.exports = app;
