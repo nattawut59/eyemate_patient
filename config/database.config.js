@@ -21,7 +21,7 @@ const pool = mysql.createPool({
   keepAliveInitialDelay: 0
 });
 
-// ทดสอบ connection
+// ทดสอบ connection (ไม่ exit เพื่อรองรับ serverless)
 pool.getConnection()
   .then(connection => {
     console.log('✅ Database connected successfully');
@@ -29,7 +29,6 @@ pool.getConnection()
   })
   .catch(err => {
     console.error('❌ Database connection failed:', err.message);
-    process.exit(1);
   });
 
 module.exports = pool;
